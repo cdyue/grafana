@@ -1,0 +1,24 @@
+# Golang build container
+FROM golang:1.13.4-alpine
+
+RUN apk add --no-cache gcc g++
+
+WORKDIR $GOPATH/src/github.com/grafana/grafana
+
+COPY go.mod go.sum ./
+COPY vendor vendor
+
+RUN go mod verify
+
+COPY pkg pkg
+COPY build.go package.json ./
+
+RUN go run build.go build
+
+
+# Final container
+FROM grafana/grafana:6.7.2
+
+COPY --from=0 /go/src/github.com/grafana/grafana/bin/linux-amd64/grafana-server /go/src/github.com/grafana/grafana/bin/linux-amd64/grafana-cli ./bin/
+ADD plugins/ /var/lib/grafana/plugins/
+

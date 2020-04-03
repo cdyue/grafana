@@ -17,7 +17,10 @@ const (
 	adminTenantHeaderName = "GRAFANA_ADMIN_TENANT_HEADER_NAME" //admin tenant, admin can visit all.
 )
 
-const targetURL = "/label/namespace/values"
+const (
+	targetNamespaceURL = "/label/namespace/values"
+	targetQueryURL     = "/query_range"
+)
 
 type labelValesResponse struct {
 	Status string   `json:"status"`
@@ -31,13 +34,26 @@ func (hs *HTTPServer) ProxyDataSourceRequestMultiTenancy(c *m.ReqContext) {
 	tenantCode := strings.ToLower(c.Req.Header.Get(os.Getenv(tenantHeaderName)))
 	adminTenantCode := os.Getenv(adminTenantHeaderName)
 	log.Printf("tenantCode: %s, adminTenantCode: %s.\n", tenantCode, adminTenantCode)
-	if strings.HasSuffix(c.Req.URL.Path, targetURL) && tenantCode != "" && tenantCode != adminTenantCode {
-		log.Printf("return specified tenant,tenantCode: %s, adminTenantCode: %s.\n", tenantCode, adminTenantCode)
-		result := labelValesResponse{}
-		result.Status = "success"
-		result.Data = append(result.Data, tenantCode)
-		c.JSON(200, result)
-		return
+	if tenantCode != "" && tenantCode != adminTenantCode {
+		if strings.HasSuffix(c.Req.URL.Path, targetNamespaceURL) {
+			log.Printf("return specified tenant,tenantCode: %s, adminTenantCode: %s.\n", tenantCode, adminTenantCode)
+
+			result := labelValesResponse{}
+			result.Status = "success"
+			result.Data = append(result.Data, tenantCode)
+			c.JSON(200, result)
+			return
+		}
+
+		// if strings.HasSuffix(c.Req.URL.Path, targetQueryURL) && c.Query("namespace") != "" && {
+		// 	log.Printf("return specified tenant,tenantCode: %s, adminTenantCode: %s.\n", tenantCode, adminTenantCode)
+
+		// 	result := labelValesResponse{}
+		// 	result.Status = "success"
+		// 	result.Data = append(result.Data, tenantCode)
+		// 	c.JSON(200, result)
+		// 	return
+		// }
 	}
 
 	dsId := c.ParamsInt64(":id")
