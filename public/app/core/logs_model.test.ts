@@ -1,14 +1,14 @@
 import {
   DataFrame,
   FieldType,
-  LogsMetaKind,
-  LogsDedupStrategy,
   LogLevel,
+  LogRowModel,
+  LogsDedupStrategy,
+  LogsMetaKind,
   MutableDataFrame,
   toDataFrame,
-  LogRowModel,
 } from '@grafana/data';
-import { dedupLogRows, dataFrameToLogsModel } from './logs_model';
+import { dataFrameToLogsModel, dedupLogRows, getSeriesProperties, logSeriesToLogsModel } from './logs_model';
 
 describe('dedupLogRows()', () => {
   test('should return rows as is when dedup is set to none', () => {
@@ -218,7 +218,7 @@ describe('dataFrameToLogsModel', () => {
         },
       }),
     ];
-    const logsModel = dataFrameToLogsModel(series, 0, 'utc');
+    const logsModel = dataFrameToLogsModel(series, 1, 'utc');
     expect(logsModel.hasUniqueLabels).toBeFalsy();
     expect(logsModel.rows).toHaveLength(2);
     expect(logsModel.rows).toMatchObject([
@@ -240,12 +240,12 @@ describe('dataFrameToLogsModel', () => {
 
     expect(logsModel.series).toHaveLength(2);
     expect(logsModel.meta).toHaveLength(2);
-    expect(logsModel.meta[0]).toMatchObject({
+    expect(logsModel.meta![0]).toMatchObject({
       label: 'Common labels',
       value: series[0].fields[1].labels,
       kind: LogsMetaKind.LabelsMap,
     });
-    expect(logsModel.meta[1]).toMatchObject({
+    expect(logsModel.meta![1]).toMatchObject({
       label: 'Limit',
       value: `1000 (2 returned)`,
       kind: LogsMetaKind.String,
@@ -274,12 +274,12 @@ describe('dataFrameToLogsModel', () => {
         ],
       }),
     ];
-    const logsModel = dataFrameToLogsModel(series, 0, 'utc');
+    const logsModel = dataFrameToLogsModel(series, 1, 'utc');
     expect(logsModel.rows).toHaveLength(1);
     expect(logsModel.rows).toMatchObject([
       {
         entry: 'WARN boooo',
-        labels: undefined,
+        labels: {},
         logLevel: LogLevel.debug,
         uniqueLabels: {},
       },
@@ -338,7 +338,7 @@ describe('dataFrameToLogsModel', () => {
         ],
       }),
     ];
-    const logsModel = dataFrameToLogsModel(series, 0, 'utc');
+    const logsModel = dataFrameToLogsModel(series, 1, 'utc');
     expect(logsModel.hasUniqueLabels).toBeTruthy();
     expect(logsModel.rows).toHaveLength(3);
     expect(logsModel.rows).toMatchObject([
@@ -364,7 +364,7 @@ describe('dataFrameToLogsModel', () => {
 
     expect(logsModel.series).toHaveLength(2);
     expect(logsModel.meta).toHaveLength(1);
-    expect(logsModel.meta[0]).toMatchObject({
+    expect(logsModel.meta![0]).toMatchObject({
       label: 'Common labels',
       value: {
         foo: 'bar',
@@ -448,7 +448,7 @@ describe('dataFrameToLogsModel', () => {
         ],
       }),
     ];
-    const logsModel = dataFrameToLogsModel(series, 0, 'utc');
+    const logsModel = dataFrameToLogsModel(series, 1, 'utc');
     expect(logsModel.hasUniqueLabels).toBeTruthy();
     expect(logsModel.rows).toHaveLength(4);
     expect(logsModel.rows).toMatchObject([
@@ -497,7 +497,7 @@ describe('dataFrameToLogsModel', () => {
         ],
       }),
     ];
-    const logsModel = dataFrameToLogsModel(series, 0, 'utc');
+    const logsModel = dataFrameToLogsModel(series, 1, 'utc');
     expect(logsModel.rows[0].uid).toBe('0');
   });
 
@@ -593,5 +593,72 @@ describe('dataFrameToLogsModel', () => {
         uniqueLabels: { baz: '2' },
       },
     ]);
+  });
+});
+
+describe('logSeriesToLogsModel', () => {
+  it('should return correct metaData even if the data is empty', () => {
+    const logSeries: DataFrame[] = [
+      {
+        fields: [],
+        length: 0,
+        refId: 'A',
+
+        meta: {
+          searchWords: ['test'],
+          limit: 1000,
+          stats: [{ displayName: 'Summary: total bytes processed', value: 97048, unit: 'decbytes' }],
+          custom: { lokiQueryStatKey: 'Summary: total bytes processed' },
+          preferredVisualisationType: 'logs',
+        },
+      },
+    ];
+
+    const metaData = {
+      hasUniqueLabels: false,
+      meta: [
+        { label: 'Limit', value: '1000 (0 returned)', kind: 1 },
+        { label: 'Total bytes processed', value: '97  kB', kind: 1 },
+      ],
+      rows: [],
+    };
+
+    expect(logSeriesToLogsModel(logSeries)).toMatchObject(metaData);
+  });
+});
+
+describe('getSeriesProperties()', () => {
+  it('sets a minimum bucket size', () => {
+    const result = getSeriesProperties([], 2, undefined, 3, 123);
+    expect(result.bucketSize).toBe(123);
+  });
+
+  it('does not adjust the bucketSize if there is no range', () => {
+    const result = getSeriesProperties([], 30, undefined, 70);
+    expect(result.bucketSize).toBe(2100);
+  });
+
+  it('does not adjust the bucketSize if the logs row times match the given range', () => {
+    const rows: LogRowModel[] = [
+      { entry: 'foo', timeEpochMs: 10 },
+      { entry: 'bar', timeEpochMs: 20 },
+    ] as any;
+    const range = { from: 10, to: 20 };
+    const result = getSeriesProperties(rows, 1, range, 2, 1);
+    expect(result.bucketSize).toBe(2);
+    expect(result.visibleRange).toMatchObject(range);
+  });
+
+  it('clamps the range and adjusts the bucketSize if the logs row times do not completely cover the given range', () => {
+    const rows: LogRowModel[] = [
+      { entry: 'foo', timeEpochMs: 10 },
+      { entry: 'bar', timeEpochMs: 20 },
+    ] as any;
+    const range = { from: 0, to: 30 };
+    const result = getSeriesProperties(rows, 3, range, 2, 1);
+    // Bucketsize 6 gets shortened to 4 because of new visible range is 20ms vs original range being 30ms
+    expect(result.bucketSize).toBe(4);
+    // From time is also aligned to bucketSize (divisible by 4)
+    expect(result.visibleRange).toMatchObject({ from: 8, to: 30 });
   });
 });

@@ -21,7 +21,7 @@ import (
 	"github.com/grafana/grafana/pkg/login"
 	"github.com/grafana/grafana/pkg/login/social"
 	"github.com/grafana/grafana/pkg/middleware"
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
 )
 
@@ -39,7 +39,7 @@ func GenStateString() (string, error) {
 	return base64.URLEncoding.EncodeToString(rnd), nil
 }
 
-func (hs *HTTPServer) OAuthLogin(ctx *m.ReqContext) {
+func (hs *HTTPServer) OAuthLogin(ctx *models.ReqContext) {
 	if setting.OAuthService == nil {
 		ctx.Handle(404, "OAuth not enabled", nil)
 		return
@@ -70,7 +70,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *m.ReqContext) {
 		}
 
 		hashedState := hashStatecode(state, setting.OAuthService.OAuthInfos[name].ClientSecret)
-		middleware.WriteCookie(ctx.Resp, OauthStateCookieName, hashedState, 60, hs.cookieOptionsFromCfg)
+		middleware.WriteCookie(ctx.Resp, OauthStateCookieName, hashedState, hs.Cfg.OAuthCookieMaxAge, hs.CookieOptionsFromCfg)
 		if setting.OAuthService.OAuthInfos[name].HostedDomain == "" {
 			ctx.Redirect(connect.AuthCodeURL(state, oauth2.AccessTypeOnline))
 		} else {
@@ -82,7 +82,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *m.ReqContext) {
 	cookieState := ctx.GetCookie(OauthStateCookieName)
 
 	// delete cookie
-	middleware.DeleteCookie(ctx.Resp, OauthStateCookieName, hs.cookieOptionsFromCfg)
+	middleware.DeleteCookie(ctx.Resp, OauthStateCookieName, hs.CookieOptionsFromCfg)
 
 	if cookieState == "" {
 		ctx.Handle(500, "login.OAuthLogin(missing saved state)", nil)
@@ -96,7 +96,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *m.ReqContext) {
 		return
 	}
 
-	// handle call back
+	// handle callback
 	tr := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
@@ -125,6 +125,7 @@ func (hs *HTTPServer) OAuthLogin(ctx *m.ReqContext) {
 			ctx.Handle(500, "login.OAuthLogin(Failed to setup TlsClientCa)", nil)
 			return
 		}
+
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(caCert)
 
@@ -172,75 +173,86 @@ func (hs *HTTPServer) OAuthLogin(ctx *m.ReqContext) {
 		return
 	}
 
-	extUser := &m.ExternalUserInfo{
-		AuthModule: "oauth_" + name,
+	user, err := syncUser(ctx, token, userInfo, name, connect)
+	if err != nil {
+		hs.redirectWithError(ctx, err)
+		return
+	}
+
+	// login
+	if err := hs.loginUserWithUser(user, ctx); err != nil {
+		hs.redirectWithError(ctx, err)
+		return
+	}
+
+	metrics.MApiLoginOAuth.Inc()
+
+	if redirectTo, err := url.QueryUnescape(ctx.GetCookie("redirect_to")); err == nil && len(redirectTo) > 0 {
+		if err := hs.ValidateRedirectTo(redirectTo); err == nil {
+			middleware.DeleteCookie(ctx.Resp, "redirect_to", hs.CookieOptionsFromCfg)
+			ctx.Redirect(redirectTo)
+			return
+		}
+		log.Debugf("Ignored invalid redirect_to cookie value: %v", redirectTo)
+	}
+
+	ctx.Redirect(setting.AppSubUrl + "/")
+}
+
+// syncUser syncs a Grafana user profile with the corresponding OAuth profile.
+func syncUser(ctx *models.ReqContext, token *oauth2.Token, userInfo *social.BasicUserInfo, name string,
+	connect social.SocialConnector) (*models.User, error) {
+	oauthLogger.Debug("Syncing Grafana user with corresponding OAuth profile")
+	extUser := &models.ExternalUserInfo{
+		AuthModule: fmt.Sprintf("oauth_%s", name),
 		OAuthToken: token,
 		AuthId:     userInfo.Id,
 		Name:       userInfo.Name,
 		Login:      userInfo.Login,
 		Email:      userInfo.Email,
-		OrgRoles:   map[int64]m.RoleType{},
+		OrgRoles:   map[int64]models.RoleType{},
 		Groups:     userInfo.Groups,
 	}
 
 	if userInfo.Role != "" {
-		rt := m.RoleType(userInfo.Role)
+		rt := models.RoleType(userInfo.Role)
 		if rt.IsValid() {
+			// The user will be assigned a role in either the auto-assigned organization or in the default one
 			var orgID int64
 			if setting.AutoAssignOrg && setting.AutoAssignOrgId > 0 {
 				orgID = int64(setting.AutoAssignOrgId)
+				logger.Debug("The user has a role assignment and organization membership is auto-assigned",
+					"role", userInfo.Role, "orgId", orgID)
 			} else {
 				orgID = int64(1)
+				logger.Debug("The user has a role assignment and organization membership is not auto-assigned",
+					"role", userInfo.Role, "orgId", orgID)
 			}
 			extUser.OrgRoles[orgID] = rt
 		}
 	}
 
-	// add/update user in grafana
-	cmd := &m.UpsertUserCommand{
+	// add/update user in Grafana
+	cmd := &models.UpsertUserCommand{
 		ReqContext:    ctx,
 		ExternalUser:  extUser,
 		SignupAllowed: connect.IsSignupAllowed(),
 	}
-
-	err = bus.Dispatch(cmd)
-	if err != nil {
-		hs.redirectWithError(ctx, err)
-		return
+	if err := bus.Dispatch(cmd); err != nil {
+		return nil, err
 	}
 
 	// Do not expose disabled status,
 	// just show incorrect user credentials error (see #17947)
 	if cmd.Result.IsDisabled {
 		oauthLogger.Warn("User is disabled", "user", cmd.Result.Login)
-		hs.redirectWithError(ctx, login.ErrInvalidCredentials)
-		return
+		return nil, login.ErrInvalidCredentials
 	}
 
-	// login
-	hs.loginUserWithUser(cmd.Result, ctx)
-
-	metrics.MApiLoginOAuth.Inc()
-
-	if redirectTo, _ := url.QueryUnescape(ctx.GetCookie("redirect_to")); len(redirectTo) > 0 {
-		middleware.DeleteCookie(ctx.Resp, "redirect_to", hs.cookieOptionsFromCfg)
-		ctx.Redirect(redirectTo)
-		return
-	}
-
-	ctx.Redirect(setting.AppSubUrl + "/")
+	return cmd.Result, nil
 }
 
 func hashStatecode(code, seed string) string {
 	hashBytes := sha256.Sum256([]byte(code + setting.SecretKey + seed))
 	return hex.EncodeToString(hashBytes[:])
-}
-
-func (hs *HTTPServer) redirectWithError(ctx *m.ReqContext, err error, v ...interface{}) {
-	ctx.Logger.Error(err.Error(), v...)
-	if err := hs.trySetEncryptedCookie(ctx, LoginErrorCookieName, err.Error(), 60); err != nil {
-		oauthLogger.Error("Failed to set encrypted cookie", "err", err)
-	}
-
-	ctx.Redirect(setting.AppSubUrl + "/login")
 }

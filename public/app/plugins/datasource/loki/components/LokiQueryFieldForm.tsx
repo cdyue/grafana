@@ -63,7 +63,7 @@ function willApplySuggestion(suggestion: string, { typeaheadContext, typeaheadTe
 
 export interface LokiQueryFieldFormProps extends ExploreQueryFieldProps<LokiDatasource, LokiQuery, LokiOptions> {
   history: LokiHistoryItem[];
-  syntax: Grammar;
+  syntax: Grammar | null;
   logLabelOptions: CascaderOption[];
   syntaxLoaded: boolean;
   absoluteRange: AbsoluteTimeRange;
@@ -128,16 +128,12 @@ export class LokiQueryFieldForm extends React.PureComponent<LokiQueryFieldFormPr
       { text, value, prefix, wrapperClasses, labelKey },
       { history, absoluteRange }
     );
-
-    //console.log('handleTypeahead', wrapperClasses, text, prefix, nextChar, labelKey, result.context);
-
     return result;
   };
 
   render() {
     const {
       ExtraFieldElement,
-      data,
       query,
       syntaxLoaded,
       logLabelOptions,
@@ -150,11 +146,10 @@ export class LokiQueryFieldForm extends React.PureComponent<LokiQueryFieldFormPr
     const hasLogLabels = logLabelOptions && logLabelOptions.length > 0;
     const chooserText = getChooserText(syntaxLoaded, hasLogLabels);
     const buttonDisabled = !(syntaxLoaded && hasLogLabels);
-    const showError = data && data.error && data.error.refId === query.refId;
 
     return (
       <>
-        <div className="gf-form-inline gf-form-inline--nowrap flex-grow-1">
+        <div className="gf-form-inline gf-form-inline--xs-view-flex-column flex-grow-1">
           <div className="gf-form flex-shrink-0">
             <ButtonCascader
               options={logLabelOptions || []}
@@ -166,7 +161,7 @@ export class LokiQueryFieldForm extends React.PureComponent<LokiQueryFieldFormPr
               {chooserText}
             </ButtonCascader>
           </div>
-          <div className="gf-form gf-form--grow flex-shrink-1">
+          <div className="gf-form gf-form--grow flex-shrink-1 min-width-15 explore-input-margin">
             <QueryField
               additionalPlugins={this.plugins}
               cleanText={cleanText}
@@ -176,18 +171,13 @@ export class LokiQueryFieldForm extends React.PureComponent<LokiQueryFieldFormPr
               onChange={this.onChangeQuery}
               onBlur={this.props.onBlur}
               onRunQuery={this.props.onRunQuery}
-              placeholder="Enter a Loki query"
+              placeholder="Enter a Loki query (run with Shift+Enter)"
               portalOrigin="loki"
               syntaxLoaded={syntaxLoaded}
             />
           </div>
           {ExtraFieldElement}
         </div>
-        {showError ? (
-          <div className="query-row-break">
-            <div className="prom-query-field-info text-error">{data.error.message}</div>
-          </div>
-        ) : null}
       </>
     );
   }

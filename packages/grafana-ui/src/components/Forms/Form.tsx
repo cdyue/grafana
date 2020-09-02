@@ -1,48 +1,50 @@
-/**
- * This is a stub implementation only for correct styles to be applied
- */
-
-import React, { useEffect } from 'react';
-import { useForm, Mode, OnSubmit, DeepPartial, FormContextValues } from 'react-hook-form';
-import { GrafanaTheme } from '@grafana/data';
+import React, { HTMLProps, useEffect } from 'react';
+import { useForm, Mode, OnSubmit, DeepPartial } from 'react-hook-form';
+import { FormAPI } from '../../types';
 import { css } from 'emotion';
-import { stylesFactory, useTheme } from '../../themes';
 
-const getFormStyles = stylesFactory((theme: GrafanaTheme) => {
-  return {
-    form: css`
-      margin-bottom: ${theme.spacing.formMargin};
-    `,
-  };
-});
-
-type FormAPI<T> = Pick<FormContextValues<T>, 'register' | 'errors' | 'control'>;
-
-interface FormProps<T> {
+interface FormProps<T> extends Omit<HTMLProps<HTMLFormElement>, 'onSubmit'> {
   validateOn?: Mode;
+  validateOnMount?: boolean;
+  validateFieldsOnMount?: string[];
   defaultValues?: DeepPartial<T>;
   onSubmit: OnSubmit<T>;
   children: (api: FormAPI<T>) => React.ReactNode;
+  /** Sets max-width for container. Use it instead of setting individual widths on inputs.*/
+  maxWidth?: number;
 }
 
-export function Form<T>({ validateOn, defaultValues, onSubmit, children }: FormProps<T>) {
-  const theme = useTheme();
-  const { handleSubmit, register, errors, control, reset, getValues } = useForm<T>({
-    mode: validateOn || 'onSubmit',
-    defaultValues: {
-      ...defaultValues,
-    },
+export function Form<T>({
+  defaultValues,
+  onSubmit,
+  validateOnMount = false,
+  validateFieldsOnMount,
+  children,
+  validateOn = 'onSubmit',
+  maxWidth = 400,
+  ...htmlProps
+}: FormProps<T>) {
+  const { handleSubmit, register, errors, control, triggerValidation, getValues, formState, watch } = useForm<T>({
+    mode: validateOn,
+    defaultValues,
   });
 
   useEffect(() => {
-    reset({ ...getValues(), ...defaultValues });
-  }, [defaultValues]);
-
-  const styles = getFormStyles(theme);
+    if (validateOnMount) {
+      triggerValidation(validateFieldsOnMount);
+    }
+  }, []);
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className={styles.form}>
-      {children({ register, errors, control })}
+    <form
+      className={css`
+        max-width: ${maxWidth}px;
+        width: 100%;
+      `}
+      onSubmit={handleSubmit(onSubmit)}
+      {...htmlProps}
+    >
+      {children({ register, errors, control, getValues, formState, watch })}
     </form>
   );
 }

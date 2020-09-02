@@ -5,26 +5,30 @@ import { DashboardSrv } from 'app/features/dashboard/services/DashboardSrv';
 import { DashboardLoaderSrv } from 'app/features/dashboard/services/DashboardLoaderSrv';
 import { TimeSrv } from 'app/features/dashboard/services/TimeSrv';
 import { AnnotationsSrv } from 'app/features/annotations/annotations_srv';
-import { VariableSrv } from 'app/features/templating/variable_srv';
 import { KeybindingSrv } from 'app/core/services/keybindingSrv';
-
 // Actions
-import { updateLocation } from 'app/core/actions';
-import { notifyApp } from 'app/core/actions';
-import locationUtil from 'app/core/utils/location_util';
+import { notifyApp, updateLocation } from 'app/core/actions';
 import {
-  dashboardInitFetching,
+  clearDashboardQueriesToUpdateOnLoad,
   dashboardInitCompleted,
   dashboardInitFailed,
-  dashboardInitSlow,
+  dashboardInitFetching,
   dashboardInitServices,
-  clearDashboardQueriesToUpdateOnLoad,
+  dashboardInitSlow,
 } from './reducers';
-
 // Types
-import { DashboardRouteInfo, StoreState, ThunkDispatch, ThunkResult, DashboardDTO } from 'app/types';
+import {
+  DashboardDTO,
+  DashboardRouteInfo,
+  StoreState,
+  ThunkDispatch,
+  ThunkResult,
+  DashboardInitPhase,
+} from 'app/types';
 import { DashboardModel } from './DashboardModel';
-import { DataQuery } from '@grafana/data';
+import { DataQuery, locationUtil } from '@grafana/data';
+import { initVariablesTransaction } from '../../variables/state/actions';
+import { emitDashboardViewEvent } from './analyticsProcessor';
 
 export interface InitDashboardArgs {
   $injector: any;
@@ -80,7 +84,7 @@ async function fetchDashboard(
       case DashboardRouteInfo.Normal: {
         // for old db routes we redirect
         if (args.urlType === 'db') {
-          redirectToNewUrl(args.urlSlug, dispatch, getState().location.path);
+          redirectToNewUrl(args.urlSlug!, dispatch, getState().location.path);
           return null;
         }
 
@@ -107,8 +111,13 @@ async function fetchDashboard(
         throw { message: 'Unknown route ' + args.routeInfo };
     }
   } catch (err) {
+    // Ignore cancelled errors
+    if (err.cancelled) {
+      return null;
+    }
+
     dispatch(dashboardInitFailed({ message: 'Failed to fetch dashboard', error: err }));
-    console.log(err);
+    console.error(err);
     return null;
   }
 }
@@ -152,7 +161,7 @@ export function initDashboard(args: InitDashboardArgs): ThunkResult<void> {
       dashboard = new DashboardModel(dashDTO.dashboard, dashDTO.meta);
     } catch (err) {
       dispatch(dashboardInitFailed({ message: 'Failed create dashboard model', error: err }));
-      console.log(err);
+      console.error(err);
       return;
     }
 
@@ -165,7 +174,6 @@ export function initDashboard(args: InitDashboardArgs): ThunkResult<void> {
     // init services
     const timeSrv: TimeSrv = args.$injector.get('timeSrv');
     const annotationsSrv: AnnotationsSrv = args.$injector.get('annotationsSrv');
-    const variableSrv: VariableSrv = args.$injector.get('variableSrv');
     const keybindingSrv: KeybindingSrv = args.$injector.get('keybindingSrv');
     const unsavedChangesSrv = args.$injector.get('unsavedChangesSrv');
     const dashboardSrv: DashboardSrv = args.$injector.get('dashboardSrv');
@@ -178,13 +186,19 @@ export function initDashboard(args: InitDashboardArgs): ThunkResult<void> {
       dashboard.meta.fromExplore = !!(panelId && queries);
     }
 
-    // template values service needs to initialize completely before
-    // the rest of the dashboard can load
-    try {
-      await variableSrv.init(dashboard);
-    } catch (err) {
-      dispatch(notifyApp(createErrorNotification('Templating init failed', err)));
-      console.log(err);
+    // template values service needs to initialize completely before the rest of the dashboard can load
+    await dispatch(initVariablesTransaction(args.urlUid!, dashboard));
+
+    if (getState().templating.transaction.uid !== args.urlUid) {
+      // if a previous dashboard has slow running variable queries the batch uid will be the new one
+      // but the args.urlUid will be the same as before initVariablesTransaction was called so then we can't continue initializing
+      // the previous dashboard.
+      return;
+    }
+
+    // If dashboard is in a different init phase it means it cancelled during service init
+    if (getState().dashboard.initPhase !== DashboardInitPhase.Services) {
+      return;
     }
 
     try {
@@ -202,7 +216,7 @@ export function initDashboard(args: InitDashboardArgs): ThunkResult<void> {
       keybindingSrv.setupDashboardBindings(args.$scope, dashboard);
     } catch (err) {
       dispatch(notifyApp(createErrorNotification('Dashboard init failed', err)));
-      console.log(err);
+      console.error(err);
     }
 
     if (storeState.dashboard.modifiedQueries) {
@@ -212,6 +226,11 @@ export function initDashboard(args: InitDashboardArgs): ThunkResult<void> {
 
     // legacy srv state
     dashboardSrv.setCurrent(dashboard);
+
+    // send open dashboard event
+    if (args.routeInfo !== DashboardRouteInfo.New) {
+      emitDashboardViewEvent(dashboard);
+    }
 
     // yay we are done
     dispatch(dashboardInitCompleted(dashboard));

@@ -14,7 +14,8 @@ func TestCloudWatchResponseParser(t *testing.T) {
 	Convey("TestCloudWatchResponseParser", t, func() {
 		Convey("can expand dimension value using exact match", func() {
 			timestamp := time.Unix(0, 0)
-			resp := map[string]*cloudwatch.MetricDataResult{
+			labels := []string{"lb1", "lb2"}
+			mdrs := map[string]*cloudwatch.MetricDataResult{
 				"lb1": {
 					Id:    aws.String("id1"),
 					Label: aws.String("lb1"),
@@ -60,7 +61,7 @@ func TestCloudWatchResponseParser(t *testing.T) {
 				Period: 60,
 				Alias:  "{{LoadBalancer}} Expanded",
 			}
-			series, partialData, err := parseGetMetricDataTimeSeries(resp, query)
+			series, partialData, err := parseGetMetricDataTimeSeries(mdrs, labels, query)
 			timeSeries := (*series)[0]
 
 			So(err, ShouldBeNil)
@@ -75,7 +76,8 @@ func TestCloudWatchResponseParser(t *testing.T) {
 
 		Convey("can expand dimension value using substring", func() {
 			timestamp := time.Unix(0, 0)
-			resp := map[string]*cloudwatch.MetricDataResult{
+			labels := []string{"lb1 Sum", "lb2 Average"}
+			mdrs := map[string]*cloudwatch.MetricDataResult{
 				"lb1 Sum": {
 					Id:    aws.String("id1"),
 					Label: aws.String("lb1 Sum"),
@@ -121,7 +123,7 @@ func TestCloudWatchResponseParser(t *testing.T) {
 				Period: 60,
 				Alias:  "{{LoadBalancer}} Expanded",
 			}
-			series, partialData, err := parseGetMetricDataTimeSeries(resp, query)
+			series, partialData, err := parseGetMetricDataTimeSeries(mdrs, labels, query)
 			timeSeries := (*series)[0]
 			So(err, ShouldBeNil)
 			So(partialData, ShouldBeFalse)
@@ -135,7 +137,8 @@ func TestCloudWatchResponseParser(t *testing.T) {
 
 		Convey("can expand dimension value using wildcard", func() {
 			timestamp := time.Unix(0, 0)
-			resp := map[string]*cloudwatch.MetricDataResult{
+			labels := []string{"lb3", "lb4"}
+			mdrs := map[string]*cloudwatch.MetricDataResult{
 				"lb3": {
 					Id:    aws.String("lb3"),
 					Label: aws.String("lb3"),
@@ -181,7 +184,7 @@ func TestCloudWatchResponseParser(t *testing.T) {
 				Period: 60,
 				Alias:  "{{LoadBalancer}} Expanded",
 			}
-			series, partialData, err := parseGetMetricDataTimeSeries(resp, query)
+			series, partialData, err := parseGetMetricDataTimeSeries(mdrs, labels, query)
 
 			So(err, ShouldBeNil)
 			So(partialData, ShouldBeFalse)
@@ -189,9 +192,88 @@ func TestCloudWatchResponseParser(t *testing.T) {
 			So((*series)[1].Name, ShouldEqual, "lb4 Expanded")
 		})
 
+		Convey("can expand dimension value when no values are returned and a multi-valued template variable is used", func() {
+			timestamp := time.Unix(0, 0)
+			labels := []string{"lb3"}
+			mdrs := map[string]*cloudwatch.MetricDataResult{
+				"lb3": {
+					Id:    aws.String("lb3"),
+					Label: aws.String("lb3"),
+					Timestamps: []*time.Time{
+						aws.Time(timestamp),
+						aws.Time(timestamp.Add(60 * time.Second)),
+						aws.Time(timestamp.Add(180 * time.Second)),
+					},
+					Values:     []*float64{},
+					StatusCode: aws.String("Complete"),
+				},
+			}
+
+			query := &cloudWatchQuery{
+				RefId:      "refId1",
+				Region:     "us-east-1",
+				Namespace:  "AWS/ApplicationELB",
+				MetricName: "TargetResponseTime",
+				Dimensions: map[string][]string{
+					"LoadBalancer": {"lb1", "lb2"},
+				},
+				Stats:  "Average",
+				Period: 60,
+				Alias:  "{{LoadBalancer}} Expanded",
+			}
+			series, partialData, err := parseGetMetricDataTimeSeries(mdrs, labels, query)
+
+			So(err, ShouldBeNil)
+			So(partialData, ShouldBeFalse)
+			So(len(*series), ShouldEqual, 2)
+			So((*series)[0].Name, ShouldEqual, "lb1 Expanded")
+			So((*series)[1].Name, ShouldEqual, "lb2 Expanded")
+		})
+
+		Convey("can expand dimension value when no values are returned and a multi-valued template variable and two single-valued dimensions are used", func() {
+			timestamp := time.Unix(0, 0)
+			labels := []string{"lb3"}
+			mdrs := map[string]*cloudwatch.MetricDataResult{
+				"lb3": {
+					Id:    aws.String("lb3"),
+					Label: aws.String("lb3"),
+					Timestamps: []*time.Time{
+						aws.Time(timestamp),
+						aws.Time(timestamp.Add(60 * time.Second)),
+						aws.Time(timestamp.Add(180 * time.Second)),
+					},
+					Values:     []*float64{},
+					StatusCode: aws.String("Complete"),
+				},
+			}
+
+			query := &cloudWatchQuery{
+				RefId:      "refId1",
+				Region:     "us-east-1",
+				Namespace:  "AWS/ApplicationELB",
+				MetricName: "TargetResponseTime",
+				Dimensions: map[string][]string{
+					"LoadBalancer": {"lb1", "lb2"},
+					"InstanceType": {"micro"},
+					"Resource":     {"res"},
+				},
+				Stats:  "Average",
+				Period: 60,
+				Alias:  "{{LoadBalancer}} Expanded {{InstanceType}} - {{Resource}}",
+			}
+			series, partialData, err := parseGetMetricDataTimeSeries(mdrs, labels, query)
+
+			So(err, ShouldBeNil)
+			So(partialData, ShouldBeFalse)
+			So(len(*series), ShouldEqual, 2)
+			So((*series)[0].Name, ShouldEqual, "lb1 Expanded micro - res")
+			So((*series)[1].Name, ShouldEqual, "lb2 Expanded micro - res")
+		})
+
 		Convey("can parse cloudwatch response", func() {
 			timestamp := time.Unix(0, 0)
-			resp := map[string]*cloudwatch.MetricDataResult{
+			labels := []string{"lb"}
+			mdrs := map[string]*cloudwatch.MetricDataResult{
 				"lb": {
 					Id:    aws.String("id1"),
 					Label: aws.String("lb"),
@@ -222,7 +304,7 @@ func TestCloudWatchResponseParser(t *testing.T) {
 				Period: 60,
 				Alias:  "{{namespace}}_{{metric}}_{{stat}}",
 			}
-			series, partialData, err := parseGetMetricDataTimeSeries(resp, query)
+			series, partialData, err := parseGetMetricDataTimeSeries(mdrs, labels, query)
 			timeSeries := (*series)[0]
 
 			So(err, ShouldBeNil)

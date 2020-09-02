@@ -1,8 +1,12 @@
+import 'whatwg-fetch'; // fetch polyfill needed backendSrv
+import { of } from 'rxjs';
+import { DataSourceInstanceSettings, toUtc } from '@grafana/data';
+
 import { PrometheusDatasource } from './datasource';
 import PrometheusMetricFindQuery from './metric_find_query';
-import { toUtc, DataSourceInstanceSettings } from '@grafana/data';
 import { backendSrv } from 'app/core/services/backend_srv'; // will use the version in __mocks__
 import { PromOptions } from './types';
+import { FetchResponse } from '@grafana/runtime';
 
 jest.mock('app/features/templating/template_srv', () => {
   return {
@@ -12,11 +16,11 @@ jest.mock('app/features/templating/template_srv', () => {
 });
 
 jest.mock('@grafana/runtime', () => ({
-  ...jest.requireActual('@grafana/runtime'),
+  ...((jest.requireActual('@grafana/runtime') as unknown) as object),
   getBackendSrv: () => backendSrv,
 }));
 
-const datasourceRequestMock = jest.spyOn(backendSrv, 'datasourceRequest');
+const fetchMock = jest.spyOn(backendSrv, 'fetch');
 
 const instanceSettings = ({
   url: 'proxied',
@@ -54,7 +58,7 @@ describe('PrometheusMetricFindQuery', () => {
   });
 
   const setupMetricFindQuery = (data: any) => {
-    datasourceRequestMock.mockImplementation(() => Promise.resolve({ status: 'success', data: data.response }));
+    fetchMock.mockImplementation(() => of(({ status: 'success', data: data.response } as unknown) as FetchResponse));
     return new PrometheusMetricFindQuery(ds, data.query);
   };
 
@@ -69,11 +73,11 @@ describe('PrometheusMetricFindQuery', () => {
       const results = await query.process();
 
       expect(results).toHaveLength(3);
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
         url: 'proxied/api/v1/labels',
-        silent: true,
+        hideFromInspector: true,
         headers: {},
       });
     });
@@ -88,11 +92,11 @@ describe('PrometheusMetricFindQuery', () => {
       const results = await query.process();
 
       expect(results).toHaveLength(3);
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
         url: 'proxied/api/v1/label/resource/values',
-        silent: true,
+        hideFromInspector: true,
         headers: {},
       });
     });
@@ -111,11 +115,13 @@ describe('PrometheusMetricFindQuery', () => {
       const results = await query.process();
 
       expect(results).toHaveLength(3);
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
-        url: `proxied/api/v1/series?match[]=metric&start=${raw.from.unix()}&end=${raw.to.unix()}`,
-        silent: true,
+        url: `proxied/api/v1/series?match${encodeURIComponent(
+          '[]'
+        )}=metric&start=${raw.from.unix()}&end=${raw.to.unix()}`,
+        hideFromInspector: true,
         headers: {},
       });
     });
@@ -134,13 +140,12 @@ describe('PrometheusMetricFindQuery', () => {
       const results = await query.process();
 
       expect(results).toHaveLength(3);
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
-        url: `proxied/api/v1/series?match[]=${encodeURIComponent(
-          'metric{label1="foo", label2="bar", label3="baz"}'
-        )}&start=${raw.from.unix()}&end=${raw.to.unix()}`,
-        silent: true,
+        url:
+          'proxied/api/v1/series?match%5B%5D=metric%7Blabel1%3D%22foo%22%2C+label2%3D%22bar%22%2C+label3%3D%22baz%22%7D&start=1524650400&end=1524654000',
+        hideFromInspector: true,
         headers: {},
       });
     });
@@ -161,11 +166,13 @@ describe('PrometheusMetricFindQuery', () => {
       expect(results).toHaveLength(2);
       expect(results[0].text).toBe('value1');
       expect(results[1].text).toBe('value2');
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
-        url: `proxied/api/v1/series?match[]=metric&start=${raw.from.unix()}&end=${raw.to.unix()}`,
-        silent: true,
+        url: `proxied/api/v1/series?match${encodeURIComponent(
+          '[]'
+        )}=metric&start=${raw.from.unix()}&end=${raw.to.unix()}`,
+        hideFromInspector: true,
         headers: {},
       });
     });
@@ -180,11 +187,11 @@ describe('PrometheusMetricFindQuery', () => {
       const results = await query.process();
 
       expect(results).toHaveLength(3);
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
         url: 'proxied/api/v1/label/__name__/values',
-        silent: true,
+        hideFromInspector: true,
         headers: {},
       });
     });
@@ -208,8 +215,8 @@ describe('PrometheusMetricFindQuery', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].text).toBe('metric{job="testjob"} 3846 1443454528000');
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
         url: `proxied/api/v1/query?query=metric&time=${raw.to.unix()}`,
         requestId: undefined,
@@ -234,13 +241,13 @@ describe('PrometheusMetricFindQuery', () => {
       expect(results[0].text).toBe('up{instance="127.0.0.1:1234",job="job1"}');
       expect(results[1].text).toBe('up{instance="127.0.0.1:5678",job="job1"}');
       expect(results[2].text).toBe('up{instance="127.0.0.1:9102",job="job1"}');
-      expect(datasourceRequestMock).toHaveBeenCalledTimes(1);
-      expect(datasourceRequestMock).toHaveBeenCalledWith({
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith({
         method: 'GET',
-        url: `proxied/api/v1/series?match[]=${encodeURIComponent(
+        url: `proxied/api/v1/series?match${encodeURIComponent('[]')}=${encodeURIComponent(
           'up{job="job1"}'
         )}&start=${raw.from.unix()}&end=${raw.to.unix()}`,
-        silent: true,
+        hideFromInspector: true,
         headers: {},
       });
     });

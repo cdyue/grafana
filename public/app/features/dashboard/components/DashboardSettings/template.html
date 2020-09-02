@@ -4,24 +4,22 @@
      ng-class="{active: ctrl.viewId === section.id}"
      ng-repeat="section in ctrl.sections"
      aria-label="{{ctrl.selectors.sectionItems(section.title)}}">
-    <i class="{{::section.icon}}"></i>
+    <icon name="'{{::section.icon}}'" style="margin-right: 4px;"></icon>
     {{::section.title}}
   </a>
 
   <div class="dashboard-settings__aside-actions">
-    <button class="btn btn-primary" ng-click="ctrl.saveDashboard()" ng-show="ctrl.canSave"
-      aria-label={{ctrl.selectors.saveDashBoard}}>
-      Save
-    </button>
-    <button class="btn btn-inverse" ng-click="ctrl.openSaveAsModal()" ng-show="ctrl.canSaveAs"
-      aria-label={{ctrl.selectors.saveAsDashBoard}}>
-      Save As...
-    </button>
+    <div ng-show="ctrl.canSave">
+      <save-dashboard-button getDashboard="ctrl.getDashboard" aria-label="Dashboard settings aside actions Save button" />
+    </div>
+    <div ng-show="ctrl.canSaveAs">
+      <save-dashboard-as-button getDashboard="ctrl.getDashboard" aria-label="Dashboard settings aside actions Save as button" variant="'secondary'" />
+    </div>
   </div>
 </aside>
 
 <div class="dashboard-settings__content" ng-if="ctrl.viewId === 'settings'">
-  <h3 class="dashboard-settings__header">
+  <h3 class="dashboard-settings__header" aria-label="{{::ctrl.selectors.title}}">
     General
   </h3>
 
@@ -52,7 +50,7 @@
     </gf-form-switch>
   </div>
 
-  <gf-time-picker-settings dashboard="ctrl.dashboard"></gf-time-picker-settings>
+  <time-picker-settings getDashboard="ctrl.getDashboard" onTimeZoneChange="ctrl.onTimeZoneChange" onRefreshIntervalChange="ctrl.onRefreshIntervalChange" onNowDelayChange="ctrl.onNowDelayChange" onHideTimePickerChange="ctrl.onHideTimePickerChange"></time-picker-settings>
 
   <h5 class="section-heading">Panel Options</h5>
   <div class="gf-form">
@@ -79,8 +77,8 @@
   ng-include="'public/app/features/annotations/partials/editor.html'">
 </div>
 
-<div class="dashboard-settings__content" ng-if="ctrl.viewId === 'templating'"
-  ng-include="'public/app/features/templating/partials/editor.html'">
+<div class="dashboard-settings__content" ng-if="ctrl.viewId === 'templating'">
+  <variable-editor-container />
 </div>
 
 <div class="dashboard-settings__content" ng-if="ctrl.viewId === 'links'">

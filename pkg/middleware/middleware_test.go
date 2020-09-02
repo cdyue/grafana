@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"encoding/base32"
 	"errors"
 	"fmt"
 	"net/http"
@@ -47,7 +46,6 @@ func TestMiddleWareSecurityHeaders(t *testing.T) {
 	setting.ERR_TEMPLATE_NAME = errorTemplate
 
 	Convey("Given the grafana middleware", t, func() {
-
 		middlewareScenario(t, "middleware should get correct x-xss-protection header", func(sc *scenarioContext) {
 			setting.XSSProtectionHeader = true
 			sc.fakeReq("GET", "/api/").exec()
@@ -265,10 +263,14 @@ func TestMiddlewareContext(t *testing.T) {
 			}
 			for _, sameSitePolicy := range sameSitePolicies {
 				setting.CookieSameSiteMode = sameSitePolicy
+				expectedCookiePath := "/"
+				if len(setting.AppSubUrl) > 0 {
+					expectedCookiePath = setting.AppSubUrl
+				}
 				expectedCookie := &http.Cookie{
 					Name:     setting.LoginCookieName,
 					Value:    "rotated",
-					Path:     setting.AppSubUrl + "/",
+					Path:     expectedCookiePath,
 					HttpOnly: true,
 					MaxAge:   int(maxAge),
 					Secure:   setting.CookieSecure,
@@ -292,10 +294,14 @@ func TestMiddlewareContext(t *testing.T) {
 			Convey("Should not set cookie with SameSite attribute when setting.CookieSameSiteDisabled is true", func() {
 				setting.CookieSameSiteDisabled = true
 				setting.CookieSameSiteMode = http.SameSiteLaxMode
+				expectedCookiePath := "/"
+				if len(setting.AppSubUrl) > 0 {
+					expectedCookiePath = setting.AppSubUrl
+				}
 				expectedCookie := &http.Cookie{
 					Name:     setting.LoginCookieName,
 					Value:    "rotated",
-					Path:     setting.AppSubUrl + "/",
+					Path:     expectedCookiePath,
 					HttpOnly: true,
 					MaxAge:   int(maxAge),
 					Secure:   setting.CookieSecure,
@@ -364,7 +370,7 @@ func TestMiddlewareContext(t *testing.T) {
 					return nil
 				})
 
-				key := fmt.Sprintf(authproxy.CachePrefix, base32.StdEncoding.EncodeToString([]byte(name+"-"+group)))
+				key := fmt.Sprintf(authproxy.CachePrefix, authproxy.HashCacheKey(name+"-"+group))
 				err := sc.remoteCacheService.Set(key, int64(33), 0)
 				So(err, ShouldBeNil)
 				sc.fakeReq("GET", "/")
@@ -616,7 +622,9 @@ func TestTokenRotationAtEndOfRequest(t *testing.T) {
 	rotateEndOfRequestFunc(reqContext, uts, token)(reqContext.Resp)
 
 	foundLoginCookie := false
-	for _, c := range rr.Result().Cookies() {
+	resp := rr.Result()
+	defer resp.Body.Close()
+	for _, c := range resp.Cookies() {
 		if c.Name == "login_token" {
 			foundLoginCookie = true
 
@@ -660,3 +668,6 @@ func (mw mockWriter) Status() int               { return 0 }
 func (mw mockWriter) Size() int                 { return 0 }
 func (mw mockWriter) Written() bool             { return false }
 func (mw mockWriter) Before(macaron.BeforeFunc) {}
+func (mw mockWriter) Push(target string, opts *http.PushOptions) error {
+	return nil
+}

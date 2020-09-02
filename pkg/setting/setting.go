@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/go-macaron/session"
 	ini "gopkg.in/ini.v1"
 
+	"github.com/grafana/grafana/pkg/components/gtime"
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/util"
 )
@@ -47,7 +47,7 @@ var (
 )
 
 // This constant corresponds to the default value for ldap_sync_ttl in .ini files
-// it is used for comparision and has to be kept in sync
+// it is used for comparison and has to be kept in sync
 const (
 	AUTH_PROXY_SYNC_TTL = 60
 )
@@ -119,6 +119,7 @@ var (
 
 	// Dashboard history
 	DashboardVersionsToKeep int
+	MinRefreshInterval      string
 
 	// User settings
 	AllowUserSignUp         bool
@@ -215,7 +216,6 @@ var (
 	S3TempImageStoreSecretKey string
 
 	ImageUploadProvider string
-	FeatureToggles      map[string]bool
 )
 
 // TODO move all global vars to this struct
@@ -227,22 +227,33 @@ type Cfg struct {
 	AppUrl           string
 	AppSubUrl        string
 	ServeFromSubPath bool
+	StaticRootPath   string
+	Protocol         Scheme
+
+	// build
+	BuildVersion string
+	BuildCommit  string
+	BuildBranch  string
+	BuildStamp   int64
+	IsEnterprise bool
+
+	// packaging
+	Packaging string
 
 	// Paths
-	ProvisioningPath string
-	DataPath         string
-	LogsPath         string
+	ProvisioningPath   string
+	DataPath           string
+	LogsPath           string
+	BundledPluginsPath string
 
 	// SMTP email settings
 	Smtp SmtpSettings
 
 	// Rendering
-	ImagesDir             string
-	PhantomDir            string
-	RendererUrl           string
-	RendererCallbackUrl   string
-	RendererLimit         int
-	RendererLimitAlerting int
+	ImagesDir                      string
+	RendererUrl                    string
+	RendererCallbackUrl            string
+	RendererConcurrentRequestLimit int
 
 	// Security
 	DisableInitAdminCreation         bool
@@ -258,14 +269,22 @@ type Cfg struct {
 	MetricsEndpointDisableTotalStats bool
 	PluginsEnableAlpha               bool
 	PluginsAppsSkipVerifyTLS         bool
+	PluginSettings                   PluginSettings
+	PluginsAllowUnsigned             []string
 	DisableSanitizeHtml              bool
 	EnterpriseLicensePath            string
+
+	// Dashboards
+	DefaultHomeDashboardPath string
 
 	// Auth
 	LoginCookieName              string
 	LoginMaxInactiveLifetimeDays int
 	LoginMaxLifetimeDays         int
 	TokenRotationIntervalMinutes int
+
+	// OAuth
+	OAuthCookieMaxAge int
 
 	// SAML Auth
 	SAMLEnabled bool
@@ -280,7 +299,30 @@ type Cfg struct {
 
 	ApiKeyMaxSecondsToLive int64
 
+	// Use to enable new features which may still be in alpha/beta stage.
 	FeatureToggles map[string]bool
+
+	AnonymousHideVersion bool
+
+	// Annotations
+	AlertingAnnotationCleanupSetting   AnnotationCleanupSettings
+	DashboardAnnotationCleanupSettings AnnotationCleanupSettings
+	APIAnnotationCleanupSettings       AnnotationCleanupSettings
+}
+
+// IsExpressionsEnabled returns whether the expressions feature is enabled.
+func (c Cfg) IsExpressionsEnabled() bool {
+	return c.FeatureToggles["expressions"]
+}
+
+// IsStandaloneAlertsEnabled returns whether the standalone alerts feature is enabled.
+func (c Cfg) IsStandaloneAlertsEnabled() bool {
+	return c.FeatureToggles["standaloneAlerts"]
+}
+
+// IsLiveEnabled returns if grafana live should be enabled
+func (c Cfg) IsLiveEnabled() bool {
+	return c.FeatureToggles["live"]
 }
 
 type CommandLineArgs struct {
@@ -305,7 +347,7 @@ func parseAppUrlAndSubUrl(section *ini.Section) (string, string, error) {
 	// Check if has app suburl.
 	url, err := url.Parse(appUrl)
 	if err != nil {
-		log.Fatal(4, "Invalid root_url(%s): %s", appUrl, err)
+		log.Fatalf(4, "Invalid root_url(%s): %s", appUrl, err)
 	}
 	appSubUrl := strings.TrimSuffix(url.Path, "/")
 
@@ -360,8 +402,36 @@ func applyEnvVariableOverrides(file *ini.File) error {
 	return nil
 }
 
+func (cfg *Cfg) readAnnotationSettings() {
+	dashboardAnnotation := cfg.Raw.Section("annotations.dashboard")
+	apiIAnnotation := cfg.Raw.Section("annotations.api")
+	alertingSection := cfg.Raw.Section("alerting")
+
+	var newAnnotationCleanupSettings = func(section *ini.Section, maxAgeField string) AnnotationCleanupSettings {
+		maxAge, err := gtime.ParseInterval(section.Key(maxAgeField).MustString(""))
+		if err != nil {
+			maxAge = 0
+		}
+
+		return AnnotationCleanupSettings{
+			MaxAge:   maxAge,
+			MaxCount: section.Key("max_annotations_to_keep").MustInt64(0),
+		}
+	}
+
+	cfg.AlertingAnnotationCleanupSetting = newAnnotationCleanupSettings(alertingSection, "max_annotation_age")
+	cfg.DashboardAnnotationCleanupSettings = newAnnotationCleanupSettings(dashboardAnnotation, "max_age")
+	cfg.APIAnnotationCleanupSettings = newAnnotationCleanupSettings(apiIAnnotation, "max_age")
+}
+
+type AnnotationCleanupSettings struct {
+	MaxAge   time.Duration
+	MaxCount int64
+}
+
 func envKey(sectionName string, keyName string) string {
 	sN := strings.ToUpper(strings.Replace(sectionName, ".", "_", -1))
+	sN = strings.Replace(sN, "-", "_", -1)
 	kN := strings.ToUpper(strings.Replace(keyName, ".", "_", -1))
 	envKey := fmt.Sprintf("GF_%s_%s", sN, kN)
 	return envKey
@@ -412,7 +482,7 @@ func getCommandLineProperties(args []string) map[string]string {
 		trimmed := strings.TrimPrefix(arg, "cfg:")
 		parts := strings.Split(trimmed, "=")
 		if len(parts) != 2 {
-			log.Fatal(3, "Invalid command line argument. argument: %v", arg)
+			log.Fatalf(3, "Invalid command line argument. argument: %v", arg)
 			return nil
 		}
 
@@ -426,30 +496,6 @@ func makeAbsolute(path string, root string) string {
 		return path
 	}
 	return filepath.Join(root, path)
-}
-
-func EvalEnvVarExpression(value string) string {
-	regex := regexp.MustCompile(`\${(\w+)}`)
-	return regex.ReplaceAllStringFunc(value, func(envVar string) string {
-		envVar = strings.TrimPrefix(envVar, "${")
-		envVar = strings.TrimSuffix(envVar, "}")
-		envValue := os.Getenv(envVar)
-
-		// if env variable is hostname and it is empty use os.Hostname as default
-		if envVar == "HOSTNAME" && envValue == "" {
-			envValue, _ = os.Hostname()
-		}
-
-		return envValue
-	})
-}
-
-func evalConfigValues(file *ini.File) {
-	for _, section := range file.Sections() {
-		for _, key := range section.Keys() {
-			key.SetValue(EvalEnvVarExpression(key.Value()))
-		}
-	}
 }
 
 func loadSpecifiedConfigFile(configFile string, masterFile *ini.File) error {
@@ -506,7 +552,7 @@ func (cfg *Cfg) loadConfiguration(args *CommandLineArgs) (*ini.File, error) {
 	// load defaults
 	parsedFile, err := ini.Load(defaultConfigFile)
 	if err != nil {
-		fmt.Println(fmt.Sprintf("Failed to parse defaults.ini, %v", err))
+		fmt.Printf("Failed to parse defaults.ini, %v\n", err)
 		os.Exit(1)
 		return nil, err
 	}
@@ -525,7 +571,7 @@ func (cfg *Cfg) loadConfiguration(args *CommandLineArgs) (*ini.File, error) {
 		if err2 != nil {
 			return nil, err2
 		}
-		log.Fatal(3, err.Error())
+		log.Fatalf(3, err.Error())
 	}
 
 	// apply environment overrides
@@ -538,7 +584,10 @@ func (cfg *Cfg) loadConfiguration(args *CommandLineArgs) (*ini.File, error) {
 	applyCommandLineProperties(commandLineProps, parsedFile)
 
 	// evaluate config values containing environment variables
-	evalConfigValues(parsedFile)
+	err = expandConfig(parsedFile)
+	if err != nil {
+		return nil, err
+	}
 
 	// update data path and logging config
 	dataPath, err := valueAsString(parsedFile.Section("paths"), "data", "")
@@ -617,6 +666,13 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	// Temporary keep global, to make refactor in steps
 	Raw = cfg.Raw
 
+	cfg.BuildVersion = BuildVersion
+	cfg.BuildCommit = BuildCommit
+	cfg.BuildStamp = BuildStamp
+	cfg.BuildBranch = BuildBranch
+	cfg.IsEnterprise = IsEnterprise
+	cfg.Packaging = Packaging
+
 	ApplicationName = APP_NAME
 
 	Env, err = valueAsString(iniFile.Section(""), "app_mode", "development")
@@ -632,65 +688,13 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 		return err
 	}
 	PluginsPath = makeAbsolute(plugins, HomePath)
-	Provisioning, err := valueAsString(iniFile.Section("paths"), "provisioning", "")
+	cfg.BundledPluginsPath = makeAbsolute("plugins-bundled", HomePath)
+	provisioning, err := valueAsString(iniFile.Section("paths"), "provisioning", "")
 	if err != nil {
 		return err
 	}
-	cfg.ProvisioningPath = makeAbsolute(Provisioning, HomePath)
-	server := iniFile.Section("server")
-	AppUrl, AppSubUrl, err = parseAppUrlAndSubUrl(server)
-	if err != nil {
-		return err
-	}
-	ServeFromSubPath = server.Key("serve_from_sub_path").MustBool(false)
-
-	cfg.AppUrl = AppUrl
-	cfg.AppSubUrl = AppSubUrl
-	cfg.ServeFromSubPath = ServeFromSubPath
-
-	Protocol = HTTP
-	protocolStr, err := valueAsString(server, "protocol", "http")
-	if err != nil {
-		return err
-	}
-	if protocolStr == "https" {
-		Protocol = HTTPS
-		CertFile = server.Key("cert_file").String()
-		KeyFile = server.Key("cert_key").String()
-	}
-	if protocolStr == "h2" {
-		Protocol = HTTP2
-		CertFile = server.Key("cert_file").String()
-		KeyFile = server.Key("cert_key").String()
-	}
-	if protocolStr == "socket" {
-		Protocol = SOCKET
-		SocketPath = server.Key("socket").String()
-	}
-
-	Domain, err = valueAsString(server, "domain", "localhost")
-	if err != nil {
-		return err
-	}
-	HttpAddr, err = valueAsString(server, "http_addr", DEFAULT_HTTP_ADDR)
-	if err != nil {
-		return err
-	}
-	HttpPort, err = valueAsString(server, "http_port", "3000")
-	if err != nil {
-		return err
-	}
-	RouterLogging = server.Key("router_logging").MustBool(false)
-
-	EnableGzip = server.Key("enable_gzip").MustBool(false)
-	EnforceDomain = server.Key("enforce_domain").MustBool(false)
-	staticRoot, err := valueAsString(server, "static_root_path", "")
-	if err != nil {
-		return err
-	}
-	StaticRootPath = makeAbsolute(staticRoot, HomePath)
-
-	if err := cfg.validateStaticRootPath(); err != nil {
+	cfg.ProvisioningPath = makeAbsolute(provisioning, HomePath)
+	if err := readServerSettings(iniFile, cfg); err != nil {
 		return err
 	}
 
@@ -700,236 +704,34 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	DataProxyTimeout = dataproxy.Key("timeout").MustInt(30)
 	cfg.SendUserHeader = dataproxy.Key("send_user_header").MustBool(false)
 
-	// read security settings
-	security := iniFile.Section("security")
-	SecretKey, err = valueAsString(security, "secret_key", "")
-	if err != nil {
-		return err
-	}
-	DisableGravatar = security.Key("disable_gravatar").MustBool(true)
-	cfg.DisableBruteForceLoginProtection = security.Key("disable_brute_force_login_protection").MustBool(false)
-	DisableBruteForceLoginProtection = cfg.DisableBruteForceLoginProtection
-
-	CookieSecure = security.Key("cookie_secure").MustBool(false)
-	cfg.CookieSecure = CookieSecure
-
-	samesiteString, err := valueAsString(security, "cookie_samesite", "lax")
-	if err != nil {
+	if err := readSecuritySettings(iniFile, cfg); err != nil {
 		return err
 	}
 
-	if samesiteString == "disabled" {
-		CookieSameSiteDisabled = true
-		cfg.CookieSameSiteDisabled = CookieSameSiteDisabled
-	} else {
-		validSameSiteValues := map[string]http.SameSite{
-			"lax":    http.SameSiteLaxMode,
-			"strict": http.SameSiteStrictMode,
-			"none":   http.SameSiteNoneMode,
-		}
-
-		if samesite, ok := validSameSiteValues[samesiteString]; ok {
-			CookieSameSiteMode = samesite
-			cfg.CookieSameSiteMode = CookieSameSiteMode
-		} else {
-			CookieSameSiteMode = http.SameSiteLaxMode
-			cfg.CookieSameSiteMode = CookieSameSiteMode
-		}
-	}
-
-	AllowEmbedding = security.Key("allow_embedding").MustBool(false)
-
-	ContentTypeProtectionHeader = security.Key("x_content_type_options").MustBool(false)
-	XSSProtectionHeader = security.Key("x_xss_protection").MustBool(false)
-	StrictTransportSecurity = security.Key("strict_transport_security").MustBool(false)
-	StrictTransportSecurityMaxAge = security.Key("strict_transport_security_max_age_seconds").MustInt(86400)
-	StrictTransportSecurityPreload = security.Key("strict_transport_security_preload").MustBool(false)
-	StrictTransportSecuritySubDomains = security.Key("strict_transport_security_subdomains").MustBool(false)
-
-	// read snapshots settings
-	snapshots := iniFile.Section("snapshots")
-	ExternalSnapshotUrl, err = valueAsString(snapshots, "external_snapshot_url", "")
-	if err != nil {
+	if err := readSnapshotsSettings(iniFile); err != nil {
 		return err
 	}
-	ExternalSnapshotName, err = valueAsString(snapshots, "external_snapshot_name", "")
-	if err != nil {
-		return err
-	}
-	ExternalEnabled = snapshots.Key("external_enabled").MustBool(true)
-	SnapShotRemoveExpired = snapshots.Key("snapshot_remove_expired").MustBool(true)
-	SnapshotPublicMode = snapshots.Key("public_mode").MustBool(false)
 
 	// read dashboard settings
 	dashboards := iniFile.Section("dashboards")
 	DashboardVersionsToKeep = dashboards.Key("versions_to_keep").MustInt(20)
-
-	//  read data source proxy white list
-	DataProxyWhiteList = make(map[string]bool)
-	securityStr, err := valueAsString(security, "data_source_proxy_whitelist", "")
-	if err != nil {
-		return err
-	}
-	for _, hostAndIp := range util.SplitString(securityStr) {
-		DataProxyWhiteList[hostAndIp] = true
-	}
-
-	// admin
-	cfg.DisableInitAdminCreation = security.Key("disable_initial_admin_creation").MustBool(false)
-	AdminUser, err = valueAsString(security, "admin_user", "")
-	if err != nil {
-		return err
-	}
-	AdminPassword, err = valueAsString(security, "admin_password", "")
+	MinRefreshInterval, err = valueAsString(dashboards, "min_refresh_interval", "5s")
 	if err != nil {
 		return err
 	}
 
-	// users
-	users := iniFile.Section("users")
-	AllowUserSignUp = users.Key("allow_sign_up").MustBool(true)
-	AllowUserOrgCreate = users.Key("allow_org_create").MustBool(true)
-	AutoAssignOrg = users.Key("auto_assign_org").MustBool(true)
-	AutoAssignOrgId = users.Key("auto_assign_org_id").MustInt(1)
-	AutoAssignOrgRole = users.Key("auto_assign_org_role").In("Editor", []string{"Editor", "Admin", "Viewer"})
-	VerifyEmailEnabled = users.Key("verify_email_enabled").MustBool(false)
-	LoginHint, err = valueAsString(users, "login_hint", "")
-	if err != nil {
-		return err
-	}
-	PasswordHint, err = valueAsString(users, "password_hint", "")
-	if err != nil {
-		return err
-	}
-	DefaultTheme, err = valueAsString(users, "default_theme", "")
-	if err != nil {
-		return err
-	}
-	ExternalUserMngLinkUrl, err = valueAsString(users, "external_manage_link_url", "")
-	if err != nil {
-		return err
-	}
-	ExternalUserMngLinkName, err = valueAsString(users, "external_manage_link_name", "")
-	if err != nil {
-		return err
-	}
-	ExternalUserMngInfo, err = valueAsString(users, "external_manage_info", "")
-	if err != nil {
-		return err
-	}
-	ViewersCanEdit = users.Key("viewers_can_edit").MustBool(false)
-	cfg.EditorsCanAdmin = users.Key("editors_can_admin").MustBool(false)
+	cfg.DefaultHomeDashboardPath = dashboards.Key("default_home_dashboard_path").MustString("")
 
-	// auth
-	auth := iniFile.Section("auth")
-
-	LoginCookieName, err = valueAsString(auth, "login_cookie_name", "grafana_session")
-	cfg.LoginCookieName = LoginCookieName
-	if err != nil {
+	if err := readUserSettings(iniFile, cfg); err != nil {
 		return err
 	}
-	cfg.LoginMaxInactiveLifetimeDays = auth.Key("login_maximum_inactive_lifetime_days").MustInt(7)
-
-	LoginMaxLifetimeDays = auth.Key("login_maximum_lifetime_days").MustInt(30)
-	cfg.LoginMaxLifetimeDays = LoginMaxLifetimeDays
-	cfg.ApiKeyMaxSecondsToLive = auth.Key("api_key_max_seconds_to_live").MustInt64(-1)
-
-	cfg.TokenRotationIntervalMinutes = auth.Key("token_rotation_interval_minutes").MustInt(10)
-	if cfg.TokenRotationIntervalMinutes < 2 {
-		cfg.TokenRotationIntervalMinutes = 2
+	if err := readAuthSettings(iniFile, cfg); err != nil {
+		return err
 	}
-
-	DisableLoginForm = auth.Key("disable_login_form").MustBool(false)
-	DisableSignoutMenu = auth.Key("disable_signout_menu").MustBool(false)
-	OAuthAutoLogin = auth.Key("oauth_auto_login").MustBool(false)
-	SignoutRedirectUrl, err = valueAsString(auth, "signout_redirect_url", "")
-	if err != nil {
+	if err := readRenderingSettings(iniFile, cfg); err != nil {
 		return err
 	}
 
-	// SAML auth
-	cfg.SAMLEnabled = iniFile.Section("auth.saml").Key("enabled").MustBool(false)
-
-	// anonymous access
-	AnonymousEnabled = iniFile.Section("auth.anonymous").Key("enabled").MustBool(false)
-	AnonymousOrgName, err = valueAsString(iniFile.Section("auth.anonymous"), "org_name", "")
-	if err != nil {
-		return err
-	}
-	AnonymousOrgRole, err = valueAsString(iniFile.Section("auth.anonymous"), "org_role", "")
-	if err != nil {
-		return err
-	}
-
-	// auth proxy
-	authProxy := iniFile.Section("auth.proxy")
-	AuthProxyEnabled = authProxy.Key("enabled").MustBool(false)
-
-	AuthProxyHeaderName, err = valueAsString(authProxy, "header_name", "")
-	if err != nil {
-		return err
-	}
-	AuthProxyHeaderProperty, err = valueAsString(authProxy, "header_property", "")
-	if err != nil {
-		return err
-	}
-	AuthProxyAutoSignUp = authProxy.Key("auto_sign_up").MustBool(true)
-	AuthProxyEnableLoginToken = authProxy.Key("enable_login_token").MustBool(false)
-
-	ldapSyncVal := authProxy.Key("ldap_sync_ttl").MustInt()
-	syncVal := authProxy.Key("sync_ttl").MustInt()
-
-	if ldapSyncVal != AUTH_PROXY_SYNC_TTL {
-		AuthProxySyncTtl = ldapSyncVal
-		cfg.Logger.Warn("[Deprecated] the configuration setting 'ldap_sync_ttl' is deprecated, please use 'sync_ttl' instead")
-	} else {
-		AuthProxySyncTtl = syncVal
-	}
-
-	AuthProxyWhitelist, err = valueAsString(authProxy, "whitelist", "")
-	if err != nil {
-		return err
-	}
-
-	AuthProxyHeaders = make(map[string]string)
-	headers, err := valueAsString(authProxy, "headers", "")
-	if err != nil {
-		return err
-	}
-	for _, propertyAndHeader := range util.SplitString(headers) {
-		split := strings.SplitN(propertyAndHeader, ":", 2)
-		if len(split) == 2 {
-			AuthProxyHeaders[split[0]] = split[1]
-		}
-	}
-
-	// basic auth
-	authBasic := iniFile.Section("auth.basic")
-	BasicAuthEnabled = authBasic.Key("enabled").MustBool(true)
-
-	// Rendering
-	renderSec := iniFile.Section("rendering")
-	cfg.RendererUrl, err = valueAsString(renderSec, "server_url", "")
-	if err != nil {
-		return err
-	}
-	cfg.RendererCallbackUrl, err = valueAsString(renderSec, "callback_url", "")
-	if err != nil {
-		return err
-	}
-	if cfg.RendererCallbackUrl == "" {
-		cfg.RendererCallbackUrl = AppUrl
-	} else {
-		if cfg.RendererCallbackUrl[len(cfg.RendererCallbackUrl)-1] != '/' {
-			cfg.RendererCallbackUrl += "/"
-		}
-		_, err := url.Parse(cfg.RendererCallbackUrl)
-		if err != nil {
-			log.Fatal(4, "Invalid callback_url(%s): %s", cfg.RendererCallbackUrl, err)
-		}
-	}
-	cfg.ImagesDir = filepath.Join(cfg.DataPath, "png")
-	cfg.PhantomDir = filepath.Join(HomePath, "tools/phantomjs")
 	cfg.TempDataLifetime = iniFile.Section("paths").Key("temp_data_lifetime").MustDuration(time.Second * 3600 * 24)
 	cfg.MetricsEndpointEnabled = iniFile.Section("metrics").Key("enabled").MustBool(true)
 	cfg.MetricsEndpointBasicAuthUsername, err = valueAsString(iniFile.Section("metrics"), "basic_auth_username", "")
@@ -948,25 +750,9 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	GoogleAnalyticsId = analytics.Key("google_analytics_ua_id").String()
 	GoogleTagManagerId = analytics.Key("google_tag_manager_id").String()
 
-	alerting := iniFile.Section("alerting")
-	AlertingEnabled = alerting.Key("enabled").MustBool(true)
-	ExecuteAlerts = alerting.Key("execute_alerts").MustBool(true)
-	AlertingRenderLimit = alerting.Key("concurrent_render_limit").MustInt(5)
-	AlertingErrorOrTimeout, err = valueAsString(alerting, "error_or_timeout", "alerting")
-	if err != nil {
+	if err := readAlertingSettings(iniFile); err != nil {
 		return err
 	}
-	AlertingNoDataOrNullValues, err = valueAsString(alerting, "nodata_or_nullvalues", "no_data")
-	if err != nil {
-		return err
-	}
-
-	evaluationTimeoutSeconds := alerting.Key("evaluation_timeout_seconds").MustInt64(30)
-	AlertingEvaluationTimeout = time.Second * time.Duration(evaluationTimeoutSeconds)
-	notificationTimeoutSeconds := alerting.Key("notification_timeout_seconds").MustInt64(30)
-	AlertingNotificationTimeout = time.Second * time.Duration(notificationTimeoutSeconds)
-	AlertingMaxAttempts = alerting.Key("max_attempts").MustInt(3)
-	AlertingMinInterval = alerting.Key("min_interval_seconds").MustInt64(1)
 
 	explore := iniFile.Section("explore")
 	ExploreEnabled = explore.Key("enabled").MustBool(true)
@@ -977,6 +763,13 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	pluginsSection := iniFile.Section("plugins")
 	cfg.PluginsEnableAlpha = pluginsSection.Key("enable_alpha").MustBool(false)
 	cfg.PluginsAppsSkipVerifyTLS = pluginsSection.Key("app_tls_skip_verify_insecure").MustBool(false)
+	cfg.PluginSettings = extractPluginSettings(iniFile.Sections())
+	pluginsAllowUnsigned := pluginsSection.Key("allow_loading_unsigned_plugins").MustString("")
+	for _, plug := range strings.Split(pluginsAllowUnsigned, ",") {
+		plug = strings.TrimSpace(plug)
+		cfg.PluginsAllowUnsigned = append(cfg.PluginsAllowUnsigned, plug)
+	}
+	cfg.Protocol = Protocol
 
 	// Read and populate feature toggles list
 	featureTogglesSection := iniFile.Section("feature_toggles")
@@ -988,7 +781,6 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	for _, feature := range util.SplitString(featuresTogglesStr) {
 		cfg.FeatureToggles[feature] = true
 	}
-	FeatureToggles = cfg.FeatureToggles
 
 	// check old location for this option
 	if panelsSection.Key("enable_alpha").MustBool(false) {
@@ -999,9 +791,10 @@ func (cfg *Cfg) Load(args *CommandLineArgs) error {
 	cfg.readSessionConfig()
 	cfg.readSmtpSettings()
 	cfg.readQuotaSettings()
+	cfg.readAnnotationSettings()
 
 	if VerifyEmailEnabled && !cfg.Smtp.Enabled {
-		log.Warn("require_email_validation is enabled but smtp is disabled")
+		log.Warnf("require_email_validation is enabled but smtp is disabled")
 	}
 
 	// check old key  name
@@ -1157,10 +950,339 @@ func (cfg *Cfg) SectionWithEnvOverrides(s string) *DynamicSection {
 	return &DynamicSection{cfg.Raw.Section(s), cfg.Logger}
 }
 
-func IsExpressionsEnabled() bool {
-	v, ok := FeatureToggles["expressions"]
-	if !ok {
-		return false
+func readSecuritySettings(iniFile *ini.File, cfg *Cfg) error {
+	security := iniFile.Section("security")
+	var err error
+	SecretKey, err = valueAsString(security, "secret_key", "")
+	if err != nil {
+		return err
 	}
-	return v
+	DisableGravatar = security.Key("disable_gravatar").MustBool(true)
+	cfg.DisableBruteForceLoginProtection = security.Key("disable_brute_force_login_protection").MustBool(false)
+	DisableBruteForceLoginProtection = cfg.DisableBruteForceLoginProtection
+
+	CookieSecure = security.Key("cookie_secure").MustBool(false)
+	cfg.CookieSecure = CookieSecure
+
+	samesiteString, err := valueAsString(security, "cookie_samesite", "lax")
+	if err != nil {
+		return err
+	}
+
+	if samesiteString == "disabled" {
+		CookieSameSiteDisabled = true
+		cfg.CookieSameSiteDisabled = CookieSameSiteDisabled
+	} else {
+		validSameSiteValues := map[string]http.SameSite{
+			"lax":    http.SameSiteLaxMode,
+			"strict": http.SameSiteStrictMode,
+			"none":   http.SameSiteNoneMode,
+		}
+
+		if samesite, ok := validSameSiteValues[samesiteString]; ok {
+			CookieSameSiteMode = samesite
+			cfg.CookieSameSiteMode = CookieSameSiteMode
+		} else {
+			CookieSameSiteMode = http.SameSiteLaxMode
+			cfg.CookieSameSiteMode = CookieSameSiteMode
+		}
+	}
+	AllowEmbedding = security.Key("allow_embedding").MustBool(false)
+
+	ContentTypeProtectionHeader = security.Key("x_content_type_options").MustBool(true)
+	XSSProtectionHeader = security.Key("x_xss_protection").MustBool(true)
+	StrictTransportSecurity = security.Key("strict_transport_security").MustBool(false)
+	StrictTransportSecurityMaxAge = security.Key("strict_transport_security_max_age_seconds").MustInt(86400)
+	StrictTransportSecurityPreload = security.Key("strict_transport_security_preload").MustBool(false)
+	StrictTransportSecuritySubDomains = security.Key("strict_transport_security_subdomains").MustBool(false)
+
+	// read data source proxy whitelist
+	DataProxyWhiteList = make(map[string]bool)
+	securityStr, err := valueAsString(security, "data_source_proxy_whitelist", "")
+	if err != nil {
+		return err
+	}
+	for _, hostAndIP := range util.SplitString(securityStr) {
+		DataProxyWhiteList[hostAndIP] = true
+	}
+
+	// admin
+	cfg.DisableInitAdminCreation = security.Key("disable_initial_admin_creation").MustBool(false)
+	AdminUser, err = valueAsString(security, "admin_user", "")
+	if err != nil {
+		return err
+	}
+	AdminPassword, err = valueAsString(security, "admin_password", "")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func readAuthSettings(iniFile *ini.File, cfg *Cfg) error {
+	auth := iniFile.Section("auth")
+
+	var err error
+	LoginCookieName, err = valueAsString(auth, "login_cookie_name", "grafana_session")
+	if err != nil {
+		return err
+	}
+	cfg.LoginCookieName = LoginCookieName
+	cfg.LoginMaxInactiveLifetimeDays = auth.Key("login_maximum_inactive_lifetime_days").MustInt(7)
+
+	LoginMaxLifetimeDays = auth.Key("login_maximum_lifetime_days").MustInt(30)
+	cfg.LoginMaxLifetimeDays = LoginMaxLifetimeDays
+	cfg.ApiKeyMaxSecondsToLive = auth.Key("api_key_max_seconds_to_live").MustInt64(-1)
+
+	cfg.TokenRotationIntervalMinutes = auth.Key("token_rotation_interval_minutes").MustInt(10)
+	if cfg.TokenRotationIntervalMinutes < 2 {
+		cfg.TokenRotationIntervalMinutes = 2
+	}
+
+	DisableLoginForm = auth.Key("disable_login_form").MustBool(false)
+	DisableSignoutMenu = auth.Key("disable_signout_menu").MustBool(false)
+	OAuthAutoLogin = auth.Key("oauth_auto_login").MustBool(false)
+	cfg.OAuthCookieMaxAge = auth.Key("oauth_state_cookie_max_age").MustInt(600)
+	SignoutRedirectUrl, err = valueAsString(auth, "signout_redirect_url", "")
+	if err != nil {
+		return err
+	}
+
+	// SAML auth
+	cfg.SAMLEnabled = iniFile.Section("auth.saml").Key("enabled").MustBool(false)
+
+	// anonymous access
+	AnonymousEnabled = iniFile.Section("auth.anonymous").Key("enabled").MustBool(false)
+	AnonymousOrgName, err = valueAsString(iniFile.Section("auth.anonymous"), "org_name", "")
+	if err != nil {
+		return err
+	}
+	AnonymousOrgRole, err = valueAsString(iniFile.Section("auth.anonymous"), "org_role", "")
+	if err != nil {
+		return err
+	}
+	cfg.AnonymousHideVersion = iniFile.Section("auth.anonymous").Key("hide_version").MustBool(false)
+
+	// basic auth
+	authBasic := iniFile.Section("auth.basic")
+	BasicAuthEnabled = authBasic.Key("enabled").MustBool(true)
+
+	authProxy := iniFile.Section("auth.proxy")
+	AuthProxyEnabled = authProxy.Key("enabled").MustBool(false)
+
+	AuthProxyHeaderName, err = valueAsString(authProxy, "header_name", "")
+	if err != nil {
+		return err
+	}
+	AuthProxyHeaderProperty, err = valueAsString(authProxy, "header_property", "")
+	if err != nil {
+		return err
+	}
+	AuthProxyAutoSignUp = authProxy.Key("auto_sign_up").MustBool(true)
+	AuthProxyEnableLoginToken = authProxy.Key("enable_login_token").MustBool(false)
+
+	ldapSyncVal := authProxy.Key("ldap_sync_ttl").MustInt()
+	syncVal := authProxy.Key("sync_ttl").MustInt()
+
+	if ldapSyncVal != AUTH_PROXY_SYNC_TTL {
+		AuthProxySyncTtl = ldapSyncVal
+		cfg.Logger.Warn("[Deprecated] the configuration setting 'ldap_sync_ttl' is deprecated, please use 'sync_ttl' instead")
+	} else {
+		AuthProxySyncTtl = syncVal
+	}
+
+	AuthProxyWhitelist, err = valueAsString(authProxy, "whitelist", "")
+	if err != nil {
+		return err
+	}
+
+	AuthProxyHeaders = make(map[string]string)
+	headers, err := valueAsString(authProxy, "headers", "")
+	if err != nil {
+		return err
+	}
+	for _, propertyAndHeader := range util.SplitString(headers) {
+		split := strings.SplitN(propertyAndHeader, ":", 2)
+		if len(split) == 2 {
+			AuthProxyHeaders[split[0]] = split[1]
+		}
+	}
+
+	return nil
+}
+
+func readUserSettings(iniFile *ini.File, cfg *Cfg) error {
+	users := iniFile.Section("users")
+	AllowUserSignUp = users.Key("allow_sign_up").MustBool(true)
+	AllowUserOrgCreate = users.Key("allow_org_create").MustBool(true)
+	AutoAssignOrg = users.Key("auto_assign_org").MustBool(true)
+	AutoAssignOrgId = users.Key("auto_assign_org_id").MustInt(1)
+	AutoAssignOrgRole = users.Key("auto_assign_org_role").In("Editor", []string{"Editor", "Admin", "Viewer"})
+	VerifyEmailEnabled = users.Key("verify_email_enabled").MustBool(false)
+	var err error
+	LoginHint, err = valueAsString(users, "login_hint", "")
+	if err != nil {
+		return err
+	}
+	PasswordHint, err = valueAsString(users, "password_hint", "")
+	if err != nil {
+		return err
+	}
+	DefaultTheme, err = valueAsString(users, "default_theme", "")
+	if err != nil {
+		return err
+	}
+	ExternalUserMngLinkUrl, err = valueAsString(users, "external_manage_link_url", "")
+	if err != nil {
+		return err
+	}
+	ExternalUserMngLinkName, err = valueAsString(users, "external_manage_link_name", "")
+	if err != nil {
+		return err
+	}
+	ExternalUserMngInfo, err = valueAsString(users, "external_manage_info", "")
+	if err != nil {
+		return err
+	}
+	ViewersCanEdit = users.Key("viewers_can_edit").MustBool(false)
+	cfg.EditorsCanAdmin = users.Key("editors_can_admin").MustBool(false)
+
+	return nil
+}
+
+func readRenderingSettings(iniFile *ini.File, cfg *Cfg) error {
+	renderSec := iniFile.Section("rendering")
+	var err error
+	cfg.RendererUrl, err = valueAsString(renderSec, "server_url", "")
+	if err != nil {
+		return err
+	}
+	cfg.RendererCallbackUrl, err = valueAsString(renderSec, "callback_url", "")
+	if err != nil {
+		return err
+	}
+	if cfg.RendererCallbackUrl == "" {
+		cfg.RendererCallbackUrl = AppUrl
+	} else {
+		if cfg.RendererCallbackUrl[len(cfg.RendererCallbackUrl)-1] != '/' {
+			cfg.RendererCallbackUrl += "/"
+		}
+		_, err := url.Parse(cfg.RendererCallbackUrl)
+		if err != nil {
+			// XXX: Should return an error?
+			log.Fatalf(4, "Invalid callback_url(%s): %s", cfg.RendererCallbackUrl, err)
+		}
+	}
+	cfg.RendererConcurrentRequestLimit = renderSec.Key("concurrent_render_request_limit").MustInt(30)
+
+	cfg.ImagesDir = filepath.Join(cfg.DataPath, "png")
+
+	return nil
+}
+
+func readAlertingSettings(iniFile *ini.File) error {
+	alerting := iniFile.Section("alerting")
+	AlertingEnabled = alerting.Key("enabled").MustBool(true)
+	ExecuteAlerts = alerting.Key("execute_alerts").MustBool(true)
+	AlertingRenderLimit = alerting.Key("concurrent_render_limit").MustInt(5)
+	var err error
+	AlertingErrorOrTimeout, err = valueAsString(alerting, "error_or_timeout", "alerting")
+	if err != nil {
+		return err
+	}
+	AlertingNoDataOrNullValues, err = valueAsString(alerting, "nodata_or_nullvalues", "no_data")
+	if err != nil {
+		return err
+	}
+
+	evaluationTimeoutSeconds := alerting.Key("evaluation_timeout_seconds").MustInt64(30)
+	AlertingEvaluationTimeout = time.Second * time.Duration(evaluationTimeoutSeconds)
+	notificationTimeoutSeconds := alerting.Key("notification_timeout_seconds").MustInt64(30)
+	AlertingNotificationTimeout = time.Second * time.Duration(notificationTimeoutSeconds)
+	AlertingMaxAttempts = alerting.Key("max_attempts").MustInt(3)
+	AlertingMinInterval = alerting.Key("min_interval_seconds").MustInt64(1)
+
+	return nil
+}
+
+func readSnapshotsSettings(iniFile *ini.File) error {
+	snapshots := iniFile.Section("snapshots")
+	var err error
+	ExternalSnapshotUrl, err = valueAsString(snapshots, "external_snapshot_url", "")
+	if err != nil {
+		return err
+	}
+	ExternalSnapshotName, err = valueAsString(snapshots, "external_snapshot_name", "")
+	if err != nil {
+		return err
+	}
+	ExternalEnabled = snapshots.Key("external_enabled").MustBool(true)
+	SnapShotRemoveExpired = snapshots.Key("snapshot_remove_expired").MustBool(true)
+	SnapshotPublicMode = snapshots.Key("public_mode").MustBool(false)
+
+	return nil
+}
+
+func readServerSettings(iniFile *ini.File, cfg *Cfg) error {
+	server := iniFile.Section("server")
+	var err error
+	AppUrl, AppSubUrl, err = parseAppUrlAndSubUrl(server)
+	if err != nil {
+		return err
+	}
+	ServeFromSubPath = server.Key("serve_from_sub_path").MustBool(false)
+
+	cfg.AppUrl = AppUrl
+	cfg.AppSubUrl = AppSubUrl
+	cfg.ServeFromSubPath = ServeFromSubPath
+
+	Protocol = HTTP
+	protocolStr, err := valueAsString(server, "protocol", "http")
+	if err != nil {
+		return err
+	}
+	if protocolStr == "https" {
+		Protocol = HTTPS
+		CertFile = server.Key("cert_file").String()
+		KeyFile = server.Key("cert_key").String()
+	}
+	if protocolStr == "h2" {
+		Protocol = HTTP2
+		CertFile = server.Key("cert_file").String()
+		KeyFile = server.Key("cert_key").String()
+	}
+	if protocolStr == "socket" {
+		Protocol = SOCKET
+		SocketPath = server.Key("socket").String()
+	}
+
+	Domain, err = valueAsString(server, "domain", "localhost")
+	if err != nil {
+		return err
+	}
+	HttpAddr, err = valueAsString(server, "http_addr", DEFAULT_HTTP_ADDR)
+	if err != nil {
+		return err
+	}
+	HttpPort, err = valueAsString(server, "http_port", "3000")
+	if err != nil {
+		return err
+	}
+	RouterLogging = server.Key("router_logging").MustBool(false)
+
+	EnableGzip = server.Key("enable_gzip").MustBool(false)
+	EnforceDomain = server.Key("enforce_domain").MustBool(false)
+	staticRoot, err := valueAsString(server, "static_root_path", "")
+	if err != nil {
+		return err
+	}
+	StaticRootPath = makeAbsolute(staticRoot, HomePath)
+	cfg.StaticRootPath = StaticRootPath
+
+	if err := cfg.validateStaticRootPath(); err != nil {
+		return err
+	}
+
+	return nil
 }

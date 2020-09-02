@@ -1,12 +1,10 @@
 import React from 'react';
 import { withCenteredStory } from '../../utils/storybook/withCenteredStory';
 import { UseState } from '../../utils/storybook/UseState';
-import { TabsBar } from './TabsBar';
-import { Tab } from './Tab';
-import { TabContent } from './TabContent';
+import { TabsBar, Tab, TabContent } from '@grafana/ui';
 
 export default {
-  title: 'General/Tabs/TabsExample',
+  title: 'Layout/Tabs',
   decorators: [withCenteredStory],
 };
 
@@ -30,6 +28,7 @@ export const Simple = () => {
                     label={tab.label}
                     active={tab.active}
                     onChangeTab={() => updateState(state.map((tab, idx) => ({ ...tab, active: idx === index })))}
+                    counter={(index + 1) * 1000}
                   />
                 );
               })}

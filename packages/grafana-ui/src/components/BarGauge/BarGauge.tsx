@@ -13,8 +13,9 @@ import {
   FieldConfig,
   FieldColorMode,
 } from '@grafana/data';
+import { selectors } from '@grafana/e2e-selectors';
 
-// Compontents
+// Components
 import { FormattedValueDisplay } from '../FormattedValueDisplay/FormattedValueDisplay';
 
 // Utils
@@ -37,7 +38,7 @@ export interface Props extends Themeable {
   height: number;
   width: number;
   field: FieldConfig;
-  display: DisplayProcessor;
+  display?: DisplayProcessor;
   value: DisplayValue;
   orientation: VizOrientation;
   itemSpacing?: number;
@@ -72,7 +73,7 @@ export class BarGauge extends PureComponent<Props> {
         steps: [],
       },
     },
-    itemSpacing: 10,
+    itemSpacing: 8,
     showUnfilled: true,
   };
 
@@ -115,7 +116,11 @@ export class BarGauge extends PureComponent<Props> {
 
     return (
       <div style={styles.wrapper}>
-        <FormattedValueDisplay className="bar-gauge__value" value={value} style={styles.value} />
+        <FormattedValueDisplay
+          aria-label={selectors.components.Panels.Visualization.BarGauge.value}
+          value={value}
+          style={styles.value}
+        />
         {showUnfilled && <div style={styles.emptyBar} />}
         <div style={styles.bar} />
       </div>
@@ -235,7 +240,11 @@ export class BarGauge extends PureComponent<Props> {
     return (
       <div style={containerStyles}>
         {cells}
-        <FormattedValueDisplay className="bar-gauge__value" value={value} style={valueStyles} />
+        <FormattedValueDisplay
+          aria-label={selectors.components.Panels.Visualization.BarGauge.value}
+          value={value}
+          style={valueStyles}
+        />
       </div>
     );
   }
@@ -605,9 +614,6 @@ function getValueStyles(
     styles.paddingRight = `${VALUE_LEFT_PADDING}px`;
     // Need to remove the left padding from the text width constraints
     textWidth -= VALUE_LEFT_PADDING;
-
-    // adjust width of title box
-    styles.width = measureText(formattedValueString, styles.fontSize).width + VALUE_LEFT_PADDING * 2;
   }
 
   return styles;

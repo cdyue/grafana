@@ -1,9 +1,10 @@
 import React, { Component } from 'react';
 import classNames from 'classnames';
 import { isEqual } from 'lodash';
-import { DataLink, ScopedVars, PanelMenuItem } from '@grafana/data';
-import { ClickOutsideWrapper } from '@grafana/ui';
-import { e2e } from '@grafana/e2e';
+import { DataLink, LoadingState, PanelData, PanelMenuItem, QueryResultMetaNotice, ScopedVars } from '@grafana/data';
+import { AngularComponent } from '@grafana/runtime';
+import { ClickOutsideWrapper, Icon, Tooltip } from '@grafana/ui';
+import { selectors } from '@grafana/e2e-selectors';
 
 import PanelHeaderCorner from './PanelHeaderCorner';
 import { PanelHeaderMenu } from './PanelHeaderMenu';
@@ -13,18 +14,22 @@ import { DashboardModel } from 'app/features/dashboard/state/DashboardModel';
 import { PanelModel } from 'app/features/dashboard/state/PanelModel';
 import { getPanelLinksSupplier } from 'app/features/panel/panellinks/linkSuppliers';
 import { getPanelMenu } from 'app/features/dashboard/utils/getPanelMenu';
+import { updateLocation } from 'app/core/actions';
 
 export interface Props {
   panel: PanelModel;
   dashboard: DashboardModel;
-  timeInfo?: string;
   title?: string;
   description?: string;
   scopedVars?: ScopedVars;
+  angularComponent?: AngularComponent | null;
   links?: DataLink[];
   error?: string;
-  isFullscreen: boolean;
-  isLoading: boolean;
+  alertState?: string;
+  isViewing: boolean;
+  isEditing: boolean;
+  data: PanelData;
+  updateLocation: typeof updateLocation;
 }
 
 interface ClickCoordinates {
@@ -67,8 +72,8 @@ export class PanelHeader extends Component<Props, State> {
 
     event.stopPropagation();
 
-    const { dashboard, panel } = this.props;
-    const menuItems = getPanelMenu(dashboard, panel);
+    const { dashboard, panel, angularComponent } = this.props;
+    const menuItems = getPanelMenu(dashboard, panel, angularComponent);
 
     this.setState({
       panelMenuOpen: !this.state.panelMenuOpen,
@@ -82,27 +87,71 @@ export class PanelHeader extends Component<Props, State> {
     });
   };
 
+  onCancelQuery = () => {
+    this.props.panel.getQueryRunner().cancelQuery();
+  };
+
   private renderLoadingState(): JSX.Element {
     return (
-      <div className="panel-loading">
-        <i className="fa fa-spinner fa-spin" />
+      <div className="panel-loading" onClick={this.onCancelQuery}>
+        <Tooltip content="Cancel query">
+          <Icon className="panel-loading__spinner spin-clockwise" name="sync" />
+        </Tooltip>
       </div>
     );
   }
 
+  openInspect = (e: React.SyntheticEvent, tab: string) => {
+    const { updateLocation, panel } = this.props;
+
+    e.stopPropagation();
+
+    updateLocation({
+      query: { inspect: panel.id, inspectTab: tab },
+      partial: true,
+    });
+  };
+
+  renderNotice = (notice: QueryResultMetaNotice) => {
+    return (
+      <Tooltip content={notice.text} key={notice.severity}>
+        {notice.inspect ? (
+          <div className="panel-info-notice pointer" onClick={e => this.openInspect(e, notice.inspect!)}>
+            <Icon name="info-circle" style={{ marginRight: '8px' }} />
+          </div>
+        ) : (
+          <a className="panel-info-notice" href={notice.link} target="_blank">
+            <Icon name="info-circle" style={{ marginRight: '8px' }} />
+          </a>
+        )}
+      </Tooltip>
+    );
+  };
+
   render() {
-    const { panel, timeInfo, scopedVars, error, isFullscreen, isLoading } = this.props;
+    const { panel, scopedVars, error, isViewing, isEditing, data, alertState } = this.props;
     const { menuItems } = this.state;
     const title = templateSrv.replaceWithText(panel.title, scopedVars);
 
     const panelHeaderClass = classNames({
       'panel-header': true,
-      'grid-drag-handle': !isFullscreen,
+      'grid-drag-handle': !(isViewing || isEditing),
     });
+
+    // dedupe on severity
+    const notices: Record<string, QueryResultMetaNotice> = {};
+
+    for (const series of data.series) {
+      if (series.meta && series.meta.notices) {
+        for (const notice of series.meta.notices) {
+          notices[notice.severity] = notice;
+        }
+      }
+    }
 
     return (
       <>
-        {isLoading && this.renderLoadingState()}
+        {data.state === LoadingState.Loading && this.renderLoadingState()}
         <div className={panelHeaderClass}>
           <PanelHeaderCorner
             panel={panel}
@@ -116,21 +165,28 @@ export class PanelHeader extends Component<Props, State> {
             className="panel-title-container"
             onClick={this.onMenuToggle}
             onMouseDown={this.onMouseDown}
-            aria-label={e2e.pages.Dashboard.Panels.Panel.selectors.title(title)}
+            aria-label={selectors.components.Panels.Panel.title(title)}
           >
             <div className="panel-title">
-              <span className="icon-gf panel-alert-icon" />
-              <span className="panel-title-text">
-                {title} <span className="fa fa-caret-down panel-menu-toggle" />
-              </span>
+              {Object.values(notices).map(this.renderNotice)}
+              {alertState && (
+                <Icon
+                  name={alertState === 'alerting' ? 'heart-break' : 'heart'}
+                  className="icon-gf panel-alert-icon"
+                  style={{ marginRight: '4px' }}
+                  size="sm"
+                />
+              )}
+              <span className="panel-title-text">{title}</span>
+              <Icon name="angle-down" className="panel-menu-toggle" />
               {this.state.panelMenuOpen && (
-                <ClickOutsideWrapper onClick={this.closeMenu}>
+                <ClickOutsideWrapper onClick={this.closeMenu} parent={document}>
                   <PanelHeaderMenu items={menuItems} />
                 </ClickOutsideWrapper>
               )}
-              {timeInfo && (
+              {data.request && data.request.timeInfo && (
                 <span className="panel-time-info">
-                  <i className="fa fa-clock-o" /> {timeInfo}
+                  <Icon name="clock-nine" size="sm" /> {data.request.timeInfo}
                 </span>
               )}
             </div>

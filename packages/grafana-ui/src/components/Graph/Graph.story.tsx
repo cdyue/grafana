@@ -1,5 +1,5 @@
 import React from 'react';
-import { Graph } from './Graph';
+import { Graph } from '@grafana/ui';
 import Chart from '../Chart';
 import { dateTime, ArrayVector, FieldType, GraphSeriesXY, FieldColorMode } from '@grafana/data';
 import { select } from '@storybook/addon-knobs';
@@ -8,7 +8,7 @@ import { TooltipContentProps } from '../Chart/Tooltip';
 import { JSONFormatter } from '../JSONFormatter/JSONFormatter';
 
 export default {
-  title: 'Visualizations|Graph/Graph',
+  title: 'Visualizations/Graph',
   component: Graph,
   decorators: [withCenteredStory],
 };
